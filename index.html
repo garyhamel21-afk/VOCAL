@@ -55,8 +55,18 @@ main{flex:1;display:flex;flex-direction:column;overflow:hidden}
 #sheetBar{display:flex;align-items:center;gap:12px;padding:6px 16px;border-bottom:1px solid var(--line);color:var(--dim);font-size:13px}
 #sheet{flex:1;overflow-y:auto;padding:18px 24px 40vh;font-size:var(--sheetSize,18px);line-height:1.35}
 .section{color:var(--accent);font-weight:700;font-size:.8em;margin:1.2em 0 .3em;letter-spacing:1px;text-transform:uppercase}
-.line{margin:0 0 .55em;white-space:pre-wrap}
-.line.active{background:rgba(79,195,247,.12);border-left:3px solid var(--accent);padding-left:8px;margin-left:-11px;border-radius:0 6px 6px 0}
+.line{margin:0 0 .55em;white-space:pre-wrap;transition:opacity .25s}
+.karaoke .line,.karaoke .section{opacity:.4}
+.karaoke .line.active{opacity:1}
+.line.active{background:linear-gradient(90deg,rgba(79,195,247,.32) calc(var(--p,0)*1%),rgba(79,195,247,.07) calc(var(--p,0)*1%));border-left:3px solid var(--accent);padding-left:8px;margin-left:-11px;border-radius:0 6px 6px 0}
+.line.active .seg>span:last-child{color:#fff}
+.line.syncNext{outline:2px dashed var(--chord);outline-offset:3px;border-radius:6px}
+#syncBar{position:fixed;left:0;right:0;bottom:0;background:var(--panel);border-top:2px solid var(--chord);padding:10px 16px;display:flex;gap:10px;align-items:center;z-index:50;flex-wrap:wrap}
+#btnStamp{font-size:17px;font-weight:800;padding:12px 28px;background:var(--chord);border-color:var(--chord);color:#221503;border-radius:10px}
+#btnStamp:hover{filter:brightness(1.1);color:#221503}
+#syncHint{color:var(--dim);font-size:13px;flex:1;min-width:200px}
+#offWrap{display:flex;align-items:center;gap:4px}
+#offVal{min-width:48px;text-align:center;color:var(--chord);font-weight:700}
 .seg{display:inline-block;vertical-align:bottom;white-space:pre-wrap}
 .seg .ch{display:block;color:var(--chord);font-weight:700;font-size:.8em;line-height:1.1;min-height:1.1em;padding-right:6px}
 .seg.nochord .ch{min-height:1.1em}
@@ -133,12 +143,25 @@ dialog::backdrop{background:rgba(0,0,0,.6)}
 </section>
 
 <div id="sheetBar">
-  <label><input type="checkbox" id="autoScroll" checked> 자동 스크롤(시간태그 있을 때)</label>
+  <label><input type="checkbox" id="autoScroll" checked> 자동 스크롤</label>
+  <button id="btnSync">⏱ 싱크 찍기</button>
+  <span id="offWrap" hidden>싱크
+    <button id="offDn" title="가사 강조를 더 빨리">◀ 빨리</button>
+    <span id="offVal">0.0s</span>
+    <button id="offUp" title="가사 강조를 더 늦게">늦게 ▶</button>
+  </span>
   <span style="flex:1"></span>
   글자 <button id="fontDn">A−</button><button id="fontUp">A＋</button>
 </div>
 <section id="sheet"><div id="empty">왼쪽 위 [＋ 새 곡]으로 곡을 등록하세요.<br>가사에 [G]처럼 코드를 넣으면 악보 위 코드로 표시되고, 키를 바꾸면 자동으로 이조됩니다.</div></section>
 </main>
+
+<div id="syncBar" hidden>
+  <span id="syncHint">▶ 재생하면서 <b>각 줄을 부르기 시작하는 순간</b> [지금!] 버튼이나 Space를 누르세요. 점선 테두리가 다음에 찍을 줄입니다.</span>
+  <button id="btnUndoStamp">↩ 한 줄 취소</button>
+  <button id="btnStamp">지금!</button>
+  <button id="btnSyncDone" class="primary">완료·저장</button>
+</div>
 
 <dialog id="editor">
   <form id="edForm" method="dialog">
@@ -161,7 +184,7 @@ dialog::backdrop{background:rgba(0,0,0,.6)}
       <b>작성법</b> —
       코드는 가사 안에 <code>[G]</code> <code>[Am7]</code> <code>[C/E]</code>처럼 붙는 위치에 입력 ·
       <code># 1절</code>처럼 #으로 시작하면 구간 제목 ·
-      줄 맨 앞 <code>@1:23</code>은 재생 시간태그(있으면 노래 따라 자동 하이라이트/스크롤)
+      시간태그 <code>@1:23</code>은 직접 쓸 필요 없이 <b>[⏱ 싱크 찍기]</b>로 자동 입력됩니다
     </div>
     <div class="fRow">
       <label>음원 파일 (MP3 등) <input type="file" id="edAudio" accept="audio/*"></label>
@@ -213,12 +236,12 @@ function transposeKeyName(key, n){
 
 /* ══════════ 가사 파싱 ══════════ */
 function parseBody(body){
-  return (body||'').split(/\r?\n/).map(raw=>{
+  return (body||'').split(/\r?\n/).map((raw,rawIdx)=>{
     let line = raw, time = null;
     const tm = line.match(/^@(\d+):(\d{1,2}(?:\.\d+)?)\s*/);
     if(tm){ time = parseInt(tm[1])*60 + parseFloat(tm[2]); line = line.slice(tm[0].length); }
-    if(/^#/.test(line)) return {type:'section', text:line.replace(/^#+\s*/,''), time};
-    if(!line.trim())    return {type:'blank'};
+    if(/^#/.test(line)) return {type:'section', text:line.replace(/^#+\s*/,''), time, rawIdx};
+    if(!line.trim())    return {type:'blank', rawIdx};
     const segs = []; let cur = null;
     line.split(/(\[[^\]]*\])/).forEach(tok=>{
       if(!tok) return;
@@ -228,7 +251,7 @@ function parseBody(body){
       } else { segs.push({chord:cur, text:tok}); cur = null; }
     });
     if(cur!==null) segs.push({chord:cur, text:''});
-    return {type:'line', segs, time};
+    return {type:'line', segs, time, rawIdx};
   });
 }
 
@@ -266,14 +289,16 @@ let tempo = 1;
 
 let actx=null, gainNode=null, shifter=null, audioBuf=null;
 let playing=false, ended=false, seeking=false;
-let lineEls=[], timedLines=[];
+let lineEls=[], timedLines=[], lineItems=[];
+let syncMode=false, syncPtr=0, syncStamps=[], syncBodyLines=null;
+let lastT={t:0,ts:0}, rafId=null;
 
 const total = () => Math.max(-12, Math.min(12, keyOffset + gender));
 
 /* ══════════ 리드시트 렌더 ══════════ */
 function renderSheet(){
   const sheet = $('#sheet');
-  sheet.innerHTML=''; lineEls=[]; timedLines=[];
+  sheet.innerHTML=''; lineEls=[]; timedLines=[]; lineItems=[];
   if(!song || !song.body || !song.body.trim()){
     sheet.innerHTML = '<div id="empty">이 곡에 가사가 없습니다. [✎ 편집]에서 가사와 코드를 입력하세요.</div>'; return;
   }
@@ -293,9 +318,16 @@ function renderSheet(){
       });
     }
     if(item.time!=null){ el.dataset.time=item.time; timedLines.push({time:item.time, el}); }
+    if(item.type==='line') lineItems.push({item, el});
     sheet.appendChild(el); lineEls.push(el);
   });
   timedLines.sort((a,b)=>a.time-b.time);
+  $('#offWrap').hidden = !timedLines.length;
+  updateOffsetUI();
+}
+function updateOffsetUI(){
+  const off = (song && song.syncOffset) || 0;
+  $('#offVal').textContent = (off>0?'+':'')+off.toFixed(1)+'s';
 }
 
 function updateKeyUI(){
@@ -316,6 +348,10 @@ function persistSettings(){
   if(!song || song.id==='demo-arirang') return;
   clearTimeout(persistTimer);
   persistTimer=setTimeout(()=>{ song.keyOffset=keyOffset; song.gender=gender; dbPut(song); },400);
+}
+function persistSyncOffset(){
+  if(!song || song.id==='demo-arirang') return;
+  dbPut(song);
 }
 
 /* ══════════ 오디오 ══════════ */
@@ -346,10 +382,10 @@ function makeShifter(startFrac){
   shifter.pitchSemitones = total();
   if(startFrac>0) shifter.percentagePlayed = startFrac;   // setter는 0~1 비율
   shifter.on('play', d=>{
+    lastT = {t:d.timePlayed, ts:performance.now()};   // 부드러운 채우기용 기준점
     if(seeking) return;
     $('#tCur').textContent = fmt(d.timePlayed);
     $('#seek').value = Math.min(1000, d.percentagePlayed*10);  // getter는 0~100
-    highlight(d.timePlayed);
   });
 }
 function onEnded(){
@@ -363,16 +399,31 @@ function play(){
   if(!shifter||ended) makeShifter(0);
   shifter.connect(gainNode);
   playing=true; $('#btnPlay').textContent='⏸';
+  lastT = {t:shifter.timePlayed, ts:performance.now()};
+  if(timedLines.length && !syncMode) $('#sheet').classList.add('karaoke');
+  if(!rafId) rafId=requestAnimationFrame(tick);
 }
 function pause(){
   if(shifter){ try{shifter.disconnect();}catch(e){} }
   playing=false; $('#btnPlay').textContent='▶';
+  $('#sheet').classList.remove('karaoke');
 }
 function stop(){
   destroyShifter();
   if(audioBuf) makeShifter(0);
   $('#seek').value=0; $('#tCur').textContent='0:00';
+  $('#sheet').classList.remove('karaoke');
   clearHighlight();
+}
+/* 화면 주사율(보통 60fps)에 맞춰 채우기를 부드럽게 갱신.
+   오디오 이벤트는 초당 ~10번만 오므로, 마지막 이벤트 시각(lastT) 기준으로
+   "지금쯤 몇 초일지"를 추정해서 그 사이를 메꾼다. 템포를 바꾸면
+   원곡 시간이 tempo배 속도로 흐르므로 tempo를 곱해준다. */
+function tick(){
+  if(!playing){ rafId=null; return; }
+  const est = lastT.t + (performance.now()-lastT.ts)/1000*tempo;
+  highlight(est);
+  rafId=requestAnimationFrame(tick);
 }
 function seekTo(frac){
   if(!audioBuf) return;
@@ -383,17 +434,86 @@ function seekTo(frac){
   if(wasPlaying && !playing) play();
 }
 
-/* ══════════ 하이라이트 ══════════ */
+/* ══════════ 하이라이트 (노래방식) ══════════ */
 let activeEl=null;
-function clearHighlight(){ if(activeEl){activeEl.classList.remove('active');activeEl=null;} }
+function clearHighlight(){ if(activeEl){activeEl.classList.remove('active');activeEl.style.removeProperty('--p');activeEl=null;} }
 function highlight(t){
-  if(!timedLines.length) return;
-  let cur=null;
-  for(const x of timedLines){ if(x.time<=t+0.05) cur=x.el; else break; }
-  if(cur===activeEl) return;
-  clearHighlight();
-  if(cur){ activeEl=cur; cur.classList.add('active');
-    if($('#autoScroll').checked) cur.scrollIntoView({behavior:'smooth',block:'center'}); }
+  if(!timedLines.length || syncMode) return;
+  const off = (song && song.syncOffset) || 0;   // +면 강조가 늦게, −면 빨리
+  const ta = t - off;
+  let i=-1;
+  for(let k=0;k<timedLines.length;k++){ if(timedLines[k].time<=ta+0.05) i=k; else break; }
+  const cur = i>=0 ? timedLines[i].el : null;
+  if(cur!==activeEl){
+    clearHighlight();
+    if(cur){ activeEl=cur; cur.classList.add('active');
+      if($('#autoScroll').checked) cur.scrollIntoView({behavior:'smooth',block:'center'}); }
+  }
+  /* 채우기 진행률: 이 줄 시작 ~ 다음 줄 시작 사이에서 지금이 몇 %인지 */
+  if(activeEl && i>=0){
+    const start = timedLines[i].time;
+    const end   = (i+1<timedLines.length) ? timedLines[i+1].time
+                : (audioBuf ? audioBuf.duration : start+5);
+    const p = Math.max(0, Math.min(100, (ta-start)/(end-start)*100));
+    activeEl.style.setProperty('--p', p.toFixed(1));
+  }
+}
+
+/* ══════════ 싱크 찍기 모드 ══════════ */
+function enterSync(){
+  if(!song){ toast('먼저 곡을 선택하세요'); return; }
+  if(!audioBuf){ toast('먼저 MP3를 연결하세요 — 음원이 있어야 타이밍을 찍을 수 있어요'); return; }
+  if(!lineItems.length){ toast('가사가 없습니다. [✎ 편집]에서 가사를 먼저 넣으세요'); return; }
+  syncMode=true; syncPtr=0; syncStamps=[];
+  syncBodyLines = song.body.split(/\r?\n/);
+  clearHighlight(); $('#sheet').classList.remove('karaoke');
+  $('#syncBar').hidden=false; $('#btnSync').classList.add('on');
+  markSyncPtr();
+  toast('싱크 모드: 재생하고 각 줄 시작 순간에 Space!');
+}
+function markSyncPtr(){
+  lineItems.forEach(x=>x.el.classList.remove('syncNext'));
+  if(syncPtr<lineItems.length){
+    const el=lineItems[syncPtr].el;
+    el.classList.add('syncNext');
+    el.scrollIntoView({behavior:'smooth',block:'center'});
+  }
+}
+const stampTag = t => '@'+Math.floor(t/60)+':'+String(Math.floor(t%60)).padStart(2,'0')+'.'+Math.floor((t%1)*10)+' ';
+const stripTag = s => s.replace(/^@\d+:\d{1,2}(?:\.\d+)?\s*/,'');
+function stamp(){
+  if(!syncMode) return;
+  if(syncPtr>=lineItems.length){ toast('모든 줄을 다 찍었어요! [완료·저장]을 누르세요'); return; }
+  /* 0.25초 빼는 이유: 소리가 스피커까지 나오는 지연 + 사람 반응 속도만큼
+     누르는 순간은 항상 실제 시작보다 살짝 늦기 때문 */
+  const t = Math.max(0, (shifter ? shifter.timePlayed : 0) - 0.25);
+  const li = lineItems[syncPtr];
+  syncStamps.push({idx:li.item.rawIdx, old:syncBodyLines[li.item.rawIdx]});
+  syncBodyLines[li.item.rawIdx] = stampTag(t) + stripTag(syncBodyLines[li.item.rawIdx]);
+  li.item.time = t;
+  li.el.classList.add('active');                      // 찍은 줄 잠깐 반짝
+  setTimeout(()=>li.el.classList.remove('active'), 300);
+  syncPtr++; markSyncPtr();
+}
+function undoStamp(){
+  if(!syncMode || !syncStamps.length) return;
+  const s = syncStamps.pop();
+  syncBodyLines[s.idx] = s.old;
+  syncPtr--;
+  const li = lineItems[syncPtr];
+  const tm = s.old.match(/^@(\d+):(\d{1,2}(?:\.\d+)?)/);
+  li.item.time = tm ? parseInt(tm[1])*60+parseFloat(tm[2]) : null;
+  li.el.classList.remove('active');
+  markSyncPtr();
+}
+async function finishSync(){
+  if(!syncMode) return;
+  syncMode=false;
+  $('#syncBar').hidden=true; $('#btnSync').classList.remove('on');
+  song.body = syncBodyLines.join('\n');
+  await dbPut(song);
+  renderSheet();
+  toast('싱크 저장 완료! 이제 재생하면 노래를 따라 가사가 강조됩니다');
 }
 
 /* ══════════ 곡 관리 ══════════ */
@@ -406,6 +526,7 @@ async function refreshList(selectId){
   await selectSong(sel.value);
 }
 async function selectSong(id){
+  if(syncMode){ syncMode=false; $('#syncBar').hidden=true; $('#btnSync').classList.remove('on'); }
   stop(); destroyShifter(); audioBuf=null;
   $('#btnPlay').disabled=$('#btnStop').disabled=$('#seek').disabled=true;
   $('#seek').value=0; $('#tCur').textContent='0:00'; $('#tDur').textContent='0:00';
@@ -478,6 +599,13 @@ $('#gNone').onclick   = ()=>{ gender=0; updateKeyUI(); };
 $('#gDown').onclick   = ()=>{ gender=-5; updateKeyUI(); };
 $('#gUp').onclick     = ()=>{ gender=5; updateKeyUI(); };
 
+$('#btnSync').onclick     = ()=> syncMode ? finishSync() : enterSync();
+$('#btnStamp').onclick    = stamp;
+$('#btnUndoStamp').onclick= undoStamp;
+$('#btnSyncDone').onclick = finishSync;
+$('#offDn').onclick = ()=>{ if(!song)return; song.syncOffset=Math.round(((song.syncOffset||0)-0.1)*10)/10; updateOffsetUI(); persistSyncOffset(); };
+$('#offUp').onclick = ()=>{ if(!song)return; song.syncOffset=Math.round(((song.syncOffset||0)+0.1)*10)/10; updateOffsetUI(); persistSyncOffset(); };
+
 $('#tempo').oninput = e=>{
   tempo=e.target.value/100; $('#tempoVal').textContent=e.target.value+'%';
   if(shifter) shifter.tempo=tempo;
@@ -490,6 +618,10 @@ $('#fontDn').onclick=()=>{fontPx=Math.max(12,fontPx-2);document.documentElement.
 
 document.addEventListener('keydown', e=>{
   if(e.target.tagName==='INPUT'||e.target.tagName==='TEXTAREA'||$('#editor').open) return;
+  if(syncMode){                                   // 싱크 모드에서는 Space=찍기
+    if(e.code==='Space'){ e.preventDefault(); stamp(); return; }
+    if(e.code==='Escape'){ e.preventDefault(); finishSync(); return; }
+  }
   if(e.code==='Space'){ e.preventDefault(); if(audioBuf) playing?pause():play(); }
   else if(e.key==='ArrowUp'){ e.preventDefault(); $('#keyUp').click(); }
   else if(e.key==='ArrowDown'){ e.preventDefault(); $('#keyDown').click(); }
