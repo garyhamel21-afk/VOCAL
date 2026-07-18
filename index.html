@@ -84,6 +84,11 @@ dialog::backdrop{background:rgba(0,0,0,.6)}
 #edHelp{font-size:12px;color:var(--dim);background:var(--panel2);border-radius:8px;padding:8px 12px;line-height:1.7}
 #edHelp code{color:var(--chord)}
 .fBtns{display:flex;justify-content:flex-end;gap:8px}
+#lrcRow{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+#lrcResults{max-height:160px;overflow-y:auto;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:6px;display:flex;flex-direction:column;gap:4px}
+.lrcHit{text-align:left;font-size:13px;border-color:transparent}
+.lrcHit:hover{border-color:var(--accent)}
+.lrcHit small{color:var(--dim)}
 #toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:var(--panel2);border:1px solid var(--accent);color:var(--text);padding:10px 20px;border-radius:24px;font-size:14px;opacity:0;pointer-events:none;transition:.3s;z-index:99}
 #toast.show{opacity:1}
 </style>
@@ -180,6 +185,13 @@ dialog::backdrop{background:rgba(0,0,0,.6)}
 @0:32 [G]나를 버리[C]고 가시는 [G]님은
 @0:40 [G]십리도 못[D7]가서 발병[G]난다"></textarea>
     </label>
+    <div id="lrcRow">
+      <button type="button" id="btnLrcSearch">🌐 싱크가사 자동 검색</button>
+      <button type="button" id="btnLrcFile">📄 LRC 파일 열기</button>
+      <input type="file" id="lrcFile" accept=".lrc,.txt" hidden>
+      <span style="font-size:12px;color:var(--dim)">제목·가수를 입력한 뒤 검색하면 시간표가 붙은 가사를 통째로 받아옵니다</span>
+    </div>
+    <div id="lrcResults" hidden></div>
     <div id="edHelp">
       <b>작성법</b> —
       코드는 가사 안에 <code>[G]</code> <code>[Am7]</code> <code>[C/E]</code>처럼 붙는 위치에 입력 ·
@@ -202,6 +214,7 @@ dialog::backdrop{background:rgba(0,0,0,.6)}
 </script>
 <script>
 'use strict';
+/* VOCAL v1.2 — 노래방식 싱크 + LRCLIB 가사 검색 */
 /* ══════════ 유틸 ══════════ */
 const $ = s => document.querySelector(s);
 const toastEl = $('#toast');
@@ -566,6 +579,56 @@ $('#edForm').addEventListener('submit', async e=>{
   toast('저장되었습니다');
 });
 $('#edCancel').onclick=()=>$('#editor').close();
+
+/* ══════════ 싱크 가사 가져오기 (LRCLIB / LRC 파일) ══════════ */
+/* LRC 형식 "[mm:ss.xx] 가사" → 우리 형식 "@m:ss.x 가사" 로 변환 */
+function lrcToBody(lrc){
+  const out=[];
+  lrc.split(/\r?\n/).forEach(l=>{
+    const m=l.match(/^\s*\[(\d+):(\d{1,2}(?:\.\d+)?)\]\s?(.*)$/);
+    if(!m){ if(l.trim() && !/^\[\w+:/.test(l.trim())) out.push(l); return; } // [ar:..] 같은 메타줄은 버림
+    const min=parseInt(m[1]), sec=parseFloat(m[2]), txt=m[3].trim();
+    if(!txt){ out.push(''); return; }                 // 시간만 있고 가사 없는 줄 = 간주 → 빈 줄
+    out.push('@'+min+':'+(sec<10?'0':'')+sec.toFixed(1)+' '+txt);
+  });
+  return out.join('\n').replace(/\n{3,}/g,'\n\n');
+}
+function applyLrc(lrc){
+  if($('#edBody').value.trim() && !confirm('기존 가사를 덮어쓸까요?')) return;
+  $('#edBody').value = lrcToBody(lrc);
+  $('#lrcResults').hidden = true;
+  toast('싱크 가사를 가져왔어요! 코드는 [G]처럼 원하는 위치에 직접 추가하세요');
+}
+$('#btnLrcSearch').onclick = async ()=>{
+  const q = ($('#edArtist').value+' '+$('#edName').value).trim();
+  if(!q){ toast('제목(과 가수)을 먼저 입력하세요'); return; }
+  const box=$('#lrcResults'); box.hidden=false; box.textContent='LRCLIB에서 검색 중...';
+  try{
+    const r = await fetch('https://lrclib.net/api/search?q='+encodeURIComponent(q));
+    if(!r.ok) throw new Error('서버 응답 '+r.status);
+    const hits = (await r.json()).filter(x=>x.syncedLyrics);
+    if(!hits.length){ box.textContent='싱크 가사를 못 찾았어요. 제목/가수 표기를 바꿔서(영문↔한글) 다시 검색해보세요.'; return; }
+    box.innerHTML='';
+    hits.slice(0,10).forEach(x=>{
+      const b=document.createElement('button');
+      b.type='button'; b.className='lrcHit';
+      const dur = Math.floor(x.duration/60)+':'+String(Math.floor(x.duration%60)).padStart(2,'0');
+      /* 곡 길이를 보여주는 이유: 같은 노래도 라이브/일본어판 등 버전이 많아서
+         내 MP3 길이와 비슷한 것을 고르면 싱크가 맞을 확률이 높다 */
+      b.innerHTML = `${x.trackName} — ${x.artistName} <small>(${x.albumName||''} · ${dur})</small>`;
+      b.onclick = ()=>applyLrc(x.syncedLyrics);
+      box.appendChild(b);
+    });
+  }catch(e){
+    box.textContent = '검색 실패: '+e.message+' — 인터넷 연결을 확인하세요.';
+  }
+};
+$('#btnLrcFile').onclick = ()=>$('#lrcFile').click();
+$('#lrcFile').onchange = async e=>{
+  const f=e.target.files[0]; if(!f) return;
+  applyLrc(await f.text());
+  e.target.value='';
+};
 
 /* ══════════ 이벤트 ══════════ */
 $('#songSel').onchange = e=>selectSong(e.target.value);
