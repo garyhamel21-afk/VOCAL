@@ -149,6 +149,7 @@ dialog::backdrop{background:rgba(0,0,0,.6)}
     <span id="offVal">0.0s</span>
     <button id="offUp" title="가사 강조를 더 늦게">늦게 ▶</button>
   </span>
+  <button id="btnChord">🎸 코드 자동 추출</button>
   <span style="flex:1"></span>
   글자 <button id="fontDn">A−</button><button id="fontUp">A＋</button>
 </div>
@@ -476,6 +477,167 @@ function highlight(t){
   }
 }
 
+/* ══════════ 코드(화음) 자동 추출 ══════════
+   원리: 소리를 0.37초 조각으로 잘라 12음이름별 세기(크로마그램)를 재고,
+   24가지 기본 코드 모양과 대조한 뒤, "코드는 갑자기 자주 안 바뀐다"는
+   규칙(비터비)으로 다듬는다. 마지막으로 가사 줄의 싱크 시간에 맞춰
+   비례 위치에 [코드]를 끼워 넣는다. */
+
+function fftRadix2(re, im){                       // 고속 푸리에 변환: 소리→주파수 성분
+  const n=re.length;
+  for(let i=1,j=0;i<n;i++){ let bit=n>>1; for(;j&bit;bit>>=1) j^=bit; j|=bit;
+    if(i<j){ const tr=re[i];re[i]=re[j];re[j]=tr; const ti=im[i];im[i]=im[j];im[j]=ti; } }
+  for(let len=2;len<=n;len<<=1){
+    const ang=-2*Math.PI/len, wr=Math.cos(ang), wi=Math.sin(ang);
+    for(let i=0;i<n;i+=len){
+      let cr=1, ci=0;
+      for(let k=0;k<len/2;k++){
+        const a=i+k, b=i+k+len/2;
+        const vr=re[b]*cr-im[b]*ci, vi=re[b]*ci+im[b]*cr;
+        re[b]=re[a]-vr; im[b]=im[a]-vi; re[a]+=vr; im[a]+=vi;
+        const ncr=cr*wr-ci*wi; ci=cr*wi+ci*wr; cr=ncr;
+      }
+    }
+  }
+}
+
+const CHORD_NOTES=['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+function buildTemplates(){
+  const tpl=[];
+  for(let r=0;r<12;r++){ const t=new Float32Array(12); t[r]=1.1; t[(r+4)%12]=1; t[(r+7)%12]=1; tpl.push({name:CHORD_NOTES[r], t}); }
+  for(let r=0;r<12;r++){ const t=new Float32Array(12); t[r]=1.1; t[(r+3)%12]=1; t[(r+7)%12]=1; tpl.push({name:CHORD_NOTES[r]+'m', t}); }
+  tpl.forEach(x=>{ let s=0; for(let i=0;i<12;i++)s+=x.t[i]*x.t[i]; x.norm=Math.sqrt(s); });
+  return tpl;
+}
+
+async function analyzeChords(buffer, onProgress){
+  /* 1) 모노 변환 + 다운샘플(속도 위해 ~11kHz) */
+  const dec=Math.max(1,Math.round(buffer.sampleRate/11025)), sr=buffer.sampleRate/dec;
+  const c0=buffer.getChannelData(0), c1=buffer.numberOfChannels>1?buffer.getChannelData(1):null;
+  const n=Math.floor(buffer.length/dec);
+  const x=new Float32Array(n);
+  for(let i=0;i<n;i++){ const j=i*dec; x[i]=c1?(c0[j]+c1[j])/2:c0[j]; }
+
+  /* 2) 조각마다 크로마그램 */
+  const N=8192, hop=4096;
+  const win=new Float32Array(N);
+  for(let i=0;i<N;i++) win[i]=0.5-0.5*Math.cos(2*Math.PI*i/N);
+  const frames=Math.max(0,Math.floor((n-N)/hop));
+  const chromas=[], times=[], avg=new Float32Array(12);
+  const re=new Float32Array(N), im=new Float32Array(N);
+  const kLo=Math.max(2,Math.ceil(70*N/sr)), kHi=Math.min(N/2,Math.floor(2000*N/sr));
+  for(let f=0;f<frames;f++){
+    const off=f*hop;
+    for(let i=0;i<N;i++){ re[i]=x[off+i]*win[i]; im[i]=0; }
+    fftRadix2(re,im);
+    const c=new Float32Array(12);
+    for(let k=kLo;k<kHi;k++){
+      const mag=Math.hypot(re[k],im[k]);
+      const pc=((Math.round(69+12*Math.log2(k*sr/N/440))%12)+12)%12;
+      c[pc]+=mag;
+    }
+    let s=0; for(let i=0;i<12;i++)s+=c[i];
+    if(s>0) for(let i=0;i<12;i++){ c[i]/=s; avg[i]+=c[i]; }
+    chromas.push(c); times.push((off+N/2)/sr);
+    if(f%50===0){ if(onProgress) onProgress(f/frames); await new Promise(r=>setTimeout(r)); }
+  }
+  if(!chromas.length) return {segments:[], key:null};
+
+  /* 3) 24개 코드와 닮은 정도 + 비터비(전환 벌점)로 다듬기 */
+  const tpl=buildTemplates(), S=tpl.length, SWITCH=0.08;
+  const obs=chromas.map(c=>{
+    let cn=0; for(let i=0;i<12;i++)cn+=c[i]*c[i]; cn=Math.sqrt(cn)||1;
+    return tpl.map(x=>{ let d=0; for(let i=0;i<12;i++)d+=c[i]*x.t[i]; return d/(cn*x.norm); });
+  });
+  const T=obs.length;
+  let dp=obs[0].slice(), bp=[];
+  for(let t=1;t<T;t++){
+    const nd=new Array(S), nb=new Array(S);
+    let best=-1e9, bi=0;
+    for(let s=0;s<S;s++) if(dp[s]>best){ best=dp[s]; bi=s; }
+    for(let s=0;s<S;s++){
+      const stay=dp[s], sw=best-SWITCH;
+      if(stay>=sw){ nd[s]=stay+obs[t][s]; nb[s]=s; }
+      else        { nd[s]=sw +obs[t][s]; nb[s]=bi; }
+    }
+    dp=nd; bp.push(nb);
+  }
+  let cur=0; for(let s=1;s<S;s++) if(dp[s]>dp[cur]) cur=s;
+  const path=new Array(T); path[T-1]=cur;
+  for(let t=T-2;t>=0;t--){ cur=bp[t][cur]; path[t]=cur; }
+
+  /* 4) 같은 코드 구간으로 묶고, 1.2초 미만 짧은 구간은 이웃에 흡수 */
+  let segs=[];
+  for(let t=0;t<T;t++){
+    const name=tpl[path[t]].name;
+    if(segs.length && segs[segs.length-1].chord===name) segs[segs.length-1].end=times[t]+hop/sr;
+    else segs.push({chord:name, start:times[t], end:times[t]+hop/sr});
+  }
+  const merged=[];
+  segs.forEach(sg=>{
+    if(sg.end-sg.start<1.2 && merged.length) merged[merged.length-1].end=sg.end;
+    else if(merged.length && merged[merged.length-1].chord===sg.chord) merged[merged.length-1].end=sg.end;
+    else merged.push(sg);
+  });
+
+  /* 5) 곡 전체 크로마로 키(조성) 추정 — 크럼한슬 프로파일과 상관 */
+  const KMAJ=[6.35,2.23,3.48,2.33,4.38,4.09,2.52,5.19,2.39,3.66,2.29,2.88];
+  const KMIN=[6.33,2.68,3.52,5.38,2.60,3.53,2.54,4.75,3.98,2.69,3.34,3.17];
+  let bestKey=null, bestCorr=-1e9;
+  for(let r=0;r<12;r++){
+    let cM=0,cN=0;
+    for(let i=0;i<12;i++){ cM+=avg[(i+r)%12]*KMAJ[i]; cN+=avg[(i+r)%12]*KMIN[i]; }
+    if(cM>bestCorr){ bestCorr=cM; bestKey=CHORD_NOTES[r]; }
+    if(cN>bestCorr){ bestCorr=cN; bestKey=CHORD_NOTES[r]+'m'; }
+  }
+  return {segments:merged, key:bestKey};
+}
+
+/* 추출된 코드를 가사 줄의 싱크 시간에 맞춰 비례 위치에 삽입 */
+function applyChordsToBody(segments){
+  const lines=song.body.split(/\r?\n/);
+  const items=parseBody(song.body).filter(it=>it.type==='line'&&it.time!=null).sort((a,b)=>a.time-b.time);
+  if(!items.length||!segments.length) return 0;
+  const dur=audioBuf?audioBuf.duration:items[items.length-1].time+5;
+  const chordAt=t=>{ let r=null; for(const sg of segments){ if(sg.start<=t) r=sg; else break; } return r; };
+  let inserted=0;
+  items.forEach((it,ix)=>{
+    const start=it.time, end=(ix+1<items.length)?items[ix+1].time:dur;
+    if(end-start<0.5) return;
+    const raw=lines[it.rawIdx];
+    const tagM=raw.match(/^@\d+:\d{1,2}(?:\.\d+)?\s*/); const tag=tagM?tagM[0]:'';
+    let text=raw.slice(tag.length).replace(/\[[^\]]*\]/g,'');   // 기존 코드는 지우고 새로
+    const L=Math.max(text.length,1);
+    /* 코드가 낱말 중간에 끼지 않게, ±2글자 안의 공백 뒤로 스냅 */
+    const snap=p=>{
+      p=Math.max(0,Math.min(text.length,p));
+      if(p===0||p===text.length||text[p-1]===' ') return p;   // 이미 낱말 첫머리
+      if(text[p]===' ') return p+1;                           // 공백 위면 다음 낱말 앞으로
+      for(let d=1;d<=2;d++){
+        if(text[p-d]===' ') return p-d+1;
+        if(text[p+d]===' ') return p+d+1;
+      }
+      return p;
+    };
+    const marks=[];
+    const first=chordAt(start+0.3);                             // 줄 시작 시점에 울리는 코드
+    if(first) marks.push({pos:0, chord:first.chord});
+    segments.forEach(sg=>{
+      if(sg.start>start+0.5 && sg.start<end-0.2){               // 줄 중간에 바뀌는 코드
+        const pos=snap(Math.round((sg.start-start)/(end-start)*L));
+        marks.push({pos, chord:sg.chord});
+      }
+    });
+    marks.sort((a,b)=>a.pos-b.pos);
+    const ded=[]; for(const m of marks){ if(!ded.length||ded[ded.length-1].chord!==m.chord) ded.push(m); }
+    if(!ded.length) return;
+    for(let i=ded.length-1;i>=0;i--) text=text.slice(0,ded[i].pos)+'['+ded[i].chord+']'+text.slice(ded[i].pos);
+    lines[it.rawIdx]=tag+text; inserted+=ded.length;
+  });
+  song.body=lines.join('\n');
+  return inserted;
+}
+
 /* ══════════ 곡 관리 ══════════ */
 async function refreshList(selectId){
   songs = (await dbAll()).sort((a,b)=>(a.createdAt||0)-(b.createdAt||0));
@@ -609,6 +771,22 @@ $('#gNone').onclick   = ()=>{ gender=0; updateKeyUI(); };
 $('#gDown').onclick   = ()=>{ gender=-5; updateKeyUI(); };
 $('#gUp').onclick     = ()=>{ gender=5; updateKeyUI(); };
 
+$('#btnChord').onclick = async ()=>{
+  if(!song){ toast('먼저 곡을 선택하세요'); return; }
+  if(!audioBuf){ toast('먼저 MP3를 연결하세요 — 음원을 분석해서 코드를 찾습니다'); return; }
+  if(!timedLines.length){ toast('싱크 가사가 필요해요 — [✎ 편집]에서 [🌐 싱크가사 자동 검색]을 먼저 하세요'); return; }
+  if(/\[[A-G]/.test(song.body) && !confirm('이미 코드가 있어요. 지우고 새로 추출할까요?')) return;
+  const btn=$('#btnChord'); btn.disabled=true;
+  try{
+    const res = await analyzeChords(audioBuf, p=>{ btn.textContent='🎸 분석 중 '+Math.round(p*100)+'%'; });
+    const nIns = applyChordsToBody(res.segments);
+    if(!song.key && res.key) song.key=res.key;
+    await dbPut(song);
+    updateKeyUI();   // 코드·키 표시 갱신 (renderSheet 포함)
+    toast(`코드 ${nIns}개 배치 완료 · 감지된 키: ${res.key||'?'} — 어색한 코드는 [✎ 편집]에서 고치세요`);
+  }catch(e){ toast('분석 실패: '+e.message); }
+  finally{ btn.disabled=false; btn.textContent='🎸 코드 자동 추출'; }
+};
 $('#offDn').onclick = ()=>{ if(!song)return; song.syncOffset=Math.round(((song.syncOffset||0)-0.1)*10)/10; updateOffsetUI(); persistSyncOffset(); };
 $('#offUp').onclick = ()=>{ if(!song)return; song.syncOffset=Math.round(((song.syncOffset||0)+0.1)*10)/10; updateOffsetUI(); persistSyncOffset(); };
 
